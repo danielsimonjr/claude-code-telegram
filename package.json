@@ -1,0 +1,29 @@
+{
+  "name": "claude-code-telegram",
+  "version": "1.0.0",
+  "description": "Control Claude Code from Telegram. No tunnels, no Docker, no cloud hosting.",
+  "main": "bridge.js",
+  "bin": {
+    "claude-telegram": "./bridge.js"
+  },
+  "scripts": {
+    "start": "node bridge.js",
+    "setup": "bash setup.sh"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "telegram",
+    "bot",
+    "bridge",
+    "tmux",
+    "ai",
+    "coding-assistant"
+  ],
+  "author": "Daniel Simon Jr. <Daniel@danielsimonjr.com>",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.67.0"
+  }
+}
