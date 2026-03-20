@@ -1,15 +1,15 @@
 # Claude Code Telegram Bridge
 
-Control your Claude Code session from Telegram. Send messages from your phone, get responses back. No tunnels, no cloud hosting, no Docker required.
+Control Claude Code from your phone via Telegram. Works on Windows, Mac, and Linux. No tunnels, no Docker, no cloud hosting.
 
 ## How It Works
 
 ```
-You (Telegram) → Bot (polling) → tmux send-keys → Claude Code
-Claude Code → Stop hook → response file → Bot → You (Telegram)
+You (Telegram) → Bot (polling) → stdin → Claude Code process
+Claude Code → stdout → Bot → You (Telegram)
 ```
 
-The bridge runs locally on your machine. It injects your Telegram messages into a tmux session running Claude Code, then uses Claude's Stop hook to capture responses and send them back to Telegram. No data leaves your machine except through Telegram's API.
+The bridge runs locally on your machine. It spawns Claude Code as a child process, pipes your Telegram messages to its stdin, and sends Claude's stdout responses back to Telegram. No data leaves your machine except through Telegram's API.
 
 ## Quick Start
 
@@ -26,8 +26,8 @@ The setup script walks you through creating a Telegram bot, configuring your tok
 ### Prerequisites
 
 - Node.js 18+
-- tmux
 - Claude Code CLI (authenticated)
+- A Telegram account
 
 ### 1. Create a Telegram Bot
 
@@ -53,57 +53,22 @@ cd claude-code-telegram
 npm install
 ```
 
-### 4. Install the Stop Hook
-
-Copy the hook and register it:
+### 4. Run
 
 ```bash
-cp hooks/stop-hook.sh ~/.claude/hooks/telegram-stop-hook.sh
-chmod +x ~/.claude/hooks/telegram-stop-hook.sh
+node bridge.js [optional-working-directory]
 ```
 
-Add to `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/telegram-stop-hook.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-### 5. Run
-
-Terminal 1 — start Claude Code in tmux:
-```bash
-tmux new -s claude
-claude
-```
-
-Terminal 2 — start the bridge:
-```bash
-node bridge.js
-```
-
-Now message your bot on Telegram.
+Then message your bot on Telegram. Claude Code starts automatically when you send the first message.
 
 ## Commands
 
 | Command | What it does |
 |---------|-------------|
-| `/status` | Check if tmux session is running |
-| `/screen` | Capture last 50 lines of terminal output |
-| `/stop` | Send Ctrl+C to interrupt Claude |
-| `/clear` | Clear the conversation |
+| `/start` | Initialize and show working directory |
+| `/status` | Check if Claude process is running |
+| `/stop` | Interrupt Claude (Ctrl+C) |
+| `/restart` | Kill and restart Claude process |
 | `/help` | Show commands |
 | *(any text)* | Send directly to Claude Code |
 
@@ -115,7 +80,7 @@ All config lives in `~/.claude-code-telegram/.env`:
 |----------|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | (required) | From @BotFather |
 | `ALLOWED_USERS` | (empty = anyone) | Comma-separated Telegram user IDs |
-| `TMUX_SESSION` | `claude` | Name of the tmux session |
+| `CLAUDE_WORK_DIR` | current directory | Working directory for Claude Code |
 
 ## Files
 
@@ -124,8 +89,6 @@ All config lives in `~/.claude-code-telegram/.env`:
 | `~/.claude-code-telegram/.env` | Configuration |
 | `~/.claude-code-telegram/bridge.log` | Activity log |
 | `~/.claude-code-telegram/history.jsonl` | Message history |
-| `~/.claude-code-telegram/responses/` | Stop hook response staging |
-| `~/.claude/hooks/telegram-stop-hook.sh` | Claude Code Stop hook |
 
 ## Security
 
