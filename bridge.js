@@ -112,20 +112,24 @@ const CLAUDE_BIN = findClaude();
 
 function runClaude(prompt, cwd) {
   return new Promise((resolve, reject) => {
-    log(`Running: ${CLAUDE_BIN} --print -p "${prompt.slice(0, 50)}..."`);
+    log(`Running claude --print (${prompt.length} chars): "${prompt.slice(0, 50)}..."`);
 
-    // Use spawn instead of execFile for better Windows compatibility
+    // Pipe prompt via stdin to avoid shell escaping issues with quotes/special chars
     const child = require("child_process").spawn(
       CLAUDE_BIN,
-      ["--print", "-p", prompt],
+      ["--print"],
       {
         cwd: cwd,
         timeout: CLAUDE_TIMEOUT,
         env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
         shell: true,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       }
     );
+
+    // Write prompt to stdin and close it
+    child.stdin.write(prompt);
+    child.stdin.end();
 
     let stdout = "";
     let stderr = "";
