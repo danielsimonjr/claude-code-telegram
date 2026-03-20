@@ -2,22 +2,18 @@
 /**
  * Claude Code Telegram Bridge
  *
- * Bridges Telegram messages to Claude Code. Works on Windows, Mac, and Linux.
- * Uses Telegram polling (no tunnel needed) and spawns Claude as a subprocess.
+ * Bridges Telegram messages to Claude Code using --print mode.
+ * Each message runs `claude --print -p "message"` and returns the output.
+ * Works on Windows, Mac, and Linux.
  *
  * Inspired by:
  *   - hanxiao/claudecode-telegram (tmux + Stop hook architecture)
  *   - RichardAtCT/claude-code-telegram (session persistence, security)
  *   - alexei-led/ccgram (multi-session, terminal screenshots)
- *
- * Usage:
- *   1. Set TELEGRAM_BOT_TOKEN and ALLOWED_USERS in ~/.claude-code-telegram/.env
- *   2. Run: node bridge.js [optional-working-directory]
- *   3. Message your bot on Telegram
  */
 
 const TelegramBot = require("node-telegram-bot-api");
-const { spawn } = require("child_process");
+const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -60,8 +56,10 @@ const ALLOWED_USERS = (process.env.ALLOWED_USERS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-const WORK_DIR = process.argv[2] || process.env.CLAUDE_WORK_DIR || process.cwd();
+const WORK_DIR =
+  process.argv[2] || process.env.CLAUDE_WORK_DIR || process.cwd();
 const MAX_MSG = 4000;
+const CLAUDE_TIMEOUT = 300000; // 5 minutes max per request
 
 if (!BOT_TOKEN) {
   console.error("ERROR: TELEGRAM_BOT_TOKEN not set.");
@@ -89,97 +87,79 @@ function logHistory(userId, direction, text) {
   fs.appendFileSync(HISTORY_FILE, JSON.stringify(entry) + "\n");
 }
 
-// --- Claude Process Management ---
-let claudeProcess = null;
-let outputBuffer = "";
+// --- Claude --print mode ---
 let isProcessing = false;
-let responseTimeout = null;
-let activeChatId = null;
+let messageQueue = [];
 
-function startClaude() {
-  if (claudeProcess) {
-    log("Claude process already running");
-    return;
-  }
+function runClaude(prompt, cwd) {
+  return new Promise((resolve, reject) => {
+    const args = ["--print", "-p", prompt];
 
-  log(`Starting Claude Code in: ${WORK_DIR}`);
+    log(`Running: claude --print -p "${prompt.slice(0, 50)}..."`);
 
-  claudeProcess = spawn("claude", ["--verbose"], {
-    cwd: WORK_DIR,
-    shell: true,
-    env: { ...process.env, FORCE_COLOR: "0" },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-
-  claudeProcess.stdout.on("data", (data) => {
-    const text = data.toString();
-    outputBuffer += text;
-
-    // Reset the response timeout (Claude is still outputting)
-    if (responseTimeout) clearTimeout(responseTimeout);
-
-    // Wait for Claude to finish (no output for 2 seconds)
-    responseTimeout = setTimeout(() => {
-      if (outputBuffer.trim() && activeChatId && isProcessing) {
-        sendResponse(activeChatId, outputBuffer);
-        outputBuffer = "";
-        isProcessing = false;
+    execFile("claude", args, {
+      cwd: cwd,
+      timeout: CLAUDE_TIMEOUT,
+      maxBuffer: 1024 * 1024 * 10, // 10MB
+      env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
+      shell: true,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        if (error.killed) {
+          reject(new Error("Claude timed out (5 minute limit)"));
+        } else {
+          reject(new Error(`Claude error: ${error.message}`));
+        }
+        return;
       }
-    }, 2000);
-  });
-
-  claudeProcess.stderr.on("data", (data) => {
-    const text = data.toString();
-    // Filter out noise, only log meaningful stderr
-    if (
-      text.trim() &&
-      !text.includes("ExperimentalWarning") &&
-      !text.includes("punycode")
-    ) {
-      log(`Claude stderr: ${text.slice(0, 200)}`);
-    }
-  });
-
-  claudeProcess.on("close", (code) => {
-    log(`Claude process exited with code ${code}`);
-    claudeProcess = null;
-    isProcessing = false;
-    if (activeChatId) {
-      bot.sendMessage(
-        activeChatId,
-        `⚠️ Claude process ended (code ${code}). Send any message to restart.`
-      );
-    }
-  });
-
-  claudeProcess.on("error", (err) => {
-    log(`Claude process error: ${err.message}`);
-    claudeProcess = null;
+      resolve(stdout);
+    });
   });
 }
 
-function sendToClaude(text) {
-  if (!claudeProcess || !claudeProcess.stdin.writable) {
-    startClaude();
-    // Wait a moment for startup
-    setTimeout(() => {
-      if (claudeProcess && claudeProcess.stdin.writable) {
-        claudeProcess.stdin.write(text + "\n");
-      }
-    }, 2000);
-    return;
+async function processQueue() {
+  if (isProcessing || messageQueue.length === 0) return;
+
+  isProcessing = true;
+  const { chatId, text } = messageQueue.shift();
+
+  try {
+    const response = await runClaude(text, WORK_DIR);
+    const cleaned = cleanAnsi(response);
+
+    if (cleaned) {
+      logHistory("claude", "out", cleaned);
+      await sendLong(chatId, cleaned);
+    } else {
+      await bot.sendMessage(chatId, "_(Claude returned empty response)_", {
+        parse_mode: "Markdown",
+      });
+    }
+  } catch (err) {
+    log(`Error: ${err.message}`);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
-  claudeProcess.stdin.write(text + "\n");
+
+  isProcessing = false;
+
+  // Process next message in queue
+  if (messageQueue.length > 0) {
+    processQueue();
+  }
 }
 
-function stopClaude() {
-  if (claudeProcess) {
-    claudeProcess.kill("SIGINT");
-  }
+function cleanAnsi(text) {
+  return text
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
+    .replace(/\x1b\][^\x07]*\x07/g, "")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "")
+    .trim();
 }
 
 // --- Telegram Bot ---
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(BOT_TOKEN, {
+  polling: { interval: 2000, autoStart: true },
+});
 
 log(`Bridge starting. Working directory: ${WORK_DIR}`);
 log(
@@ -206,28 +186,16 @@ function splitMessage(text) {
   return chunks;
 }
 
-async function sendResponse(chatId, text) {
-  // Clean up ANSI escape codes and control characters
-  const cleaned = text
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
-    .replace(/\x1b\][^\x07]*\x07/g, "")
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "")
-    .trim();
-
-  if (!cleaned) return;
-
-  logHistory("claude", "out", cleaned);
-  const chunks = splitMessage(cleaned);
-
+async function sendLong(chatId, text) {
+  const chunks = splitMessage(text);
   for (const chunk of chunks) {
     try {
       await bot.sendMessage(chatId, chunk, { parse_mode: "Markdown" });
     } catch {
-      // Fallback without markdown
       try {
         await bot.sendMessage(chatId, chunk);
       } catch (e2) {
-        log(`Failed to send message: ${e2.message}`);
+        log(`Failed to send: ${e2.message}`);
       }
     }
   }
@@ -236,46 +204,43 @@ async function sendResponse(chatId, text) {
 // --- Commands ---
 bot.onText(/\/start/, (msg) => {
   if (!isAllowed(msg)) return;
-  activeChatId = msg.chat.id;
   bot.sendMessage(
     msg.chat.id,
     "🤖 *Claude Code Telegram Bridge*\n\n" +
-      `Working directory: \`${WORK_DIR}\`\n\n` +
-      "Send me messages and I'll forward them to Claude Code.\n\n" +
+      `📂 Working directory:\n\`${WORK_DIR}\`\n\n` +
+      "Send any message and I'll run it through Claude Code.\n\n" +
       "*Commands:*\n" +
-      "/status — Check Claude process\n" +
-      "/stop — Interrupt Claude (Ctrl+C)\n" +
-      "/restart — Restart Claude process\n" +
-      "/help — Show this message",
+      "/status — Bridge info\n" +
+      "/queue — Show message queue\n" +
+      "/help — Show this message\n\n" +
+      "_Each message runs as a separate `claude --print` call._",
     { parse_mode: "Markdown" }
   );
-
-  // Auto-start Claude
-  if (!claudeProcess) startClaude();
 });
 
 bot.onText(/\/status/, (msg) => {
   if (!isAllowed(msg)) return;
-  const running = claudeProcess !== null;
-  const status = running
-    ? `✅ Claude is running (PID: ${claudeProcess.pid})\n📂 \`${WORK_DIR}\``
-    : "❌ Claude not running. Send any message to start.";
-  bot.sendMessage(msg.chat.id, status, { parse_mode: "Markdown" });
+  bot.sendMessage(
+    msg.chat.id,
+    `✅ Bridge running\n📂 \`${WORK_DIR}\`\n` +
+      `⏳ Processing: ${isProcessing ? "yes" : "no"}\n` +
+      `📋 Queue: ${messageQueue.length} messages`,
+    { parse_mode: "Markdown" }
+  );
 });
 
-bot.onText(/\/stop/, (msg) => {
+bot.onText(/\/queue/, (msg) => {
   if (!isAllowed(msg)) return;
-  stopClaude();
-  bot.sendMessage(msg.chat.id, "⛔ Sent interrupt to Claude");
-});
-
-bot.onText(/\/restart/, (msg) => {
-  if (!isAllowed(msg)) return;
-  stopClaude();
-  setTimeout(() => {
-    startClaude();
-    bot.sendMessage(msg.chat.id, "🔄 Claude restarted");
-  }, 1000);
+  if (messageQueue.length === 0) {
+    bot.sendMessage(msg.chat.id, "📋 Queue is empty");
+  } else {
+    const items = messageQueue
+      .map((m, i) => `${i + 1}. ${m.text.slice(0, 50)}...`)
+      .join("\n");
+    bot.sendMessage(msg.chat.id, `📋 *Queue:*\n${items}`, {
+      parse_mode: "Markdown",
+    });
+  }
 });
 
 bot.onText(/\/help/, (msg) => {
@@ -283,11 +248,11 @@ bot.onText(/\/help/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
     "*Commands:*\n" +
-      "/status — Check Claude process\n" +
-      "/stop — Interrupt Claude (Ctrl+C)\n" +
-      "/restart — Restart Claude process\n" +
+      "/status — Bridge status and working directory\n" +
+      "/queue — Show pending messages\n" +
       "/help — This message\n\n" +
-      "Any other message is sent directly to Claude Code.",
+      "Any other message goes to Claude Code.\n" +
+      "_Responses may take 10-60 seconds depending on complexity._",
     { parse_mode: "Markdown" }
   );
 });
@@ -296,52 +261,50 @@ bot.onText(/\/help/, (msg) => {
 bot.on("message", async (msg) => {
   if (msg.text && msg.text.startsWith("/")) return;
   if (!isAllowed(msg)) {
-    log(`Blocked message from unauthorized user ${msg.from.id}`);
+    log(`Blocked: user ${msg.from.id}`);
     return;
   }
   if (!msg.text) return;
 
-  activeChatId = msg.chat.id;
   const text = msg.text.trim();
   if (!text) return;
 
-  log(
-    `Message from ${msg.from.first_name} (${msg.from.id}): ${text.slice(0, 100)}`
-  );
+  log(`From ${msg.from.first_name} (${msg.from.id}): ${text.slice(0, 100)}`);
   logHistory(msg.from.id, "in", text);
 
-  // Start Claude if not running
-  if (!claudeProcess) {
-    bot.sendMessage(msg.chat.id, "🚀 Starting Claude Code...");
-    startClaude();
-    // Wait for startup then send
-    setTimeout(() => {
-      isProcessing = true;
-      outputBuffer = "";
-      sendToClaude(text);
-    }, 3000);
-    return;
-  }
+  // Add to queue
+  messageQueue.push({ chatId: msg.chat.id, text });
 
-  isProcessing = true;
-  outputBuffer = "";
-  sendToClaude(text);
-  bot.sendMessage(msg.chat.id, "📤 Sent to Claude...");
+  if (isProcessing) {
+    bot.sendMessage(
+      msg.chat.id,
+      `📋 Queued (position ${messageQueue.length}). Processing previous message...`
+    );
+  } else {
+    bot.sendMessage(msg.chat.id, "📤 Sending to Claude...");
+    processQueue();
+  }
+});
+
+// --- Error handling ---
+bot.on("polling_error", (err) => {
+  // Only log non-conflict errors (conflicts happen when restarting)
+  if (!err.message.includes("409 Conflict")) {
+    log(`Polling error: ${err.message}`);
+  }
 });
 
 // --- Graceful shutdown ---
 process.on("SIGINT", () => {
-  log("Bridge shutting down");
-  stopClaude();
+  log("Shutting down");
   bot.stopPolling();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
-  log("Bridge terminated");
-  stopClaude();
+  log("Terminated");
   bot.stopPolling();
   process.exit(0);
 });
 
-log("Bridge ready. Message your bot on Telegram to start.");
+log("Bridge ready. Message your bot on Telegram.");
