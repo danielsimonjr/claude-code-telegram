@@ -91,28 +91,66 @@ function logHistory(userId, direction, text) {
 let isProcessing = false;
 let messageQueue = [];
 
+function findClaude() {
+  // Try common locations
+  const candidates = [
+    path.join(os.homedir(), ".local", "bin", "claude"),
+    path.join(os.homedir(), ".local", "bin", "claude.cmd"),
+    "claude",
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {
+      // ignore
+    }
+  }
+  return "claude"; // fallback to PATH
+}
+
+const CLAUDE_BIN = findClaude();
+
 function runClaude(prompt, cwd) {
   return new Promise((resolve, reject) => {
-    const args = ["--print", "-p", prompt];
+    log(`Running: ${CLAUDE_BIN} --print -p "${prompt.slice(0, 50)}..."`);
 
-    log(`Running: claude --print -p "${prompt.slice(0, 50)}..."`);
-
-    execFile("claude", args, {
-      cwd: cwd,
-      timeout: CLAUDE_TIMEOUT,
-      maxBuffer: 1024 * 1024 * 10, // 10MB
-      env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
-      shell: true,
-    }, (error, stdout, stderr) => {
-      if (error) {
-        if (error.killed) {
-          reject(new Error("Claude timed out (5 minute limit)"));
-        } else {
-          reject(new Error(`Claude error: ${error.message}`));
-        }
-        return;
+    // Use spawn instead of execFile for better Windows compatibility
+    const child = require("child_process").spawn(
+      CLAUDE_BIN,
+      ["--print", "-p", prompt],
+      {
+        cwd: cwd,
+        timeout: CLAUDE_TIMEOUT,
+        env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
+        shell: true,
+        stdio: ["ignore", "pipe", "pipe"],
       }
-      resolve(stdout);
+    );
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    child.on("error", (err) => {
+      log(`Spawn error: ${err.message}`);
+      reject(new Error(`Failed to start Claude: ${err.message}`));
+    });
+
+    child.on("close", (code) => {
+      if (code !== 0) {
+        log(`Claude exited ${code}: ${stderr.slice(0, 200)}`);
+        reject(new Error(`Claude exited with code ${code}: ${stderr.slice(0, 200)}`));
+      } else {
+        log(`Claude responded (${stdout.length} chars)`);
+        resolve(stdout);
+      }
     });
   });
 }
@@ -141,12 +179,18 @@ async function processQueue() {
   }
 
   isProcessing = false;
+  log(`[DEBUG] processQueue done. isProcessing=${isProcessing}, queue=${messageQueue.length}`);
 
   // Process next message in queue
   if (messageQueue.length > 0) {
     processQueue();
   }
 }
+
+// Catch any unhandled promise rejections
+process.on("unhandledRejection", (err) => {
+  log(`[ERROR] Unhandled rejection: ${err.message || err}`);
+});
 
 function cleanAnsi(text) {
   return text
@@ -157,8 +201,15 @@ function cleanAnsi(text) {
 }
 
 // --- Telegram Bot ---
+// Clear stale polling sessions before starting
+const https = require("https");
+const clearUrl = `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=-1`;
+https.get(clearUrl, () => {
+  log("Cleared stale Telegram updates");
+});
+
 const bot = new TelegramBot(BOT_TOKEN, {
-  polling: { interval: 2000, autoStart: true },
+  polling: { interval: 1000, autoStart: true, params: { timeout: 30 } },
 });
 
 log(`Bridge starting. Working directory: ${WORK_DIR}`);
@@ -259,6 +310,7 @@ bot.onText(/\/help/, (msg) => {
 
 // --- Main message handler ---
 bot.on("message", async (msg) => {
+  log(`[DEBUG] Raw message received: "${(msg.text || "").slice(0, 50)}" from ${msg.from.id}`);
   if (msg.text && msg.text.startsWith("/")) return;
   if (!isAllowed(msg)) {
     log(`Blocked: user ${msg.from.id}`);
@@ -274,6 +326,8 @@ bot.on("message", async (msg) => {
 
   // Add to queue
   messageQueue.push({ chatId: msg.chat.id, text });
+
+  log(`[DEBUG] isProcessing=${isProcessing}, queue=${messageQueue.length}`);
 
   if (isProcessing) {
     bot.sendMessage(
