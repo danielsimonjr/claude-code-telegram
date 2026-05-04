@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-05-01
+
 ### Security
 
 - Cleared the remaining 5 moderate-severity npm-audit vulnerabilities in the
