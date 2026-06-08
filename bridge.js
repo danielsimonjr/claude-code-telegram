@@ -17,7 +17,7 @@
  *   - alexei-led/ccgram
  */
 
-const TelegramBot = require("node-telegram-bot-api");
+const { Bot } = require("grammy");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -176,13 +176,14 @@ function runClaudeTurn(chatId, prompt) {
         const preview = cleaned.slice(0, MAX_MSG);
         try {
           if (statusMsgId) {
-            await bot.editMessageText(preview + "\n\n_... streaming ..._", {
-              chat_id: chatId,
-              message_id: statusMsgId,
-              parse_mode: "Markdown",
-            });
+            await bot.api.editMessageText(
+              chatId,
+              statusMsgId,
+              preview + "\n\n_... streaming ..._",
+              { parse_mode: "Markdown" }
+            );
           } else {
-            const sent = await bot.sendMessage(
+            const sent = await bot.api.sendMessage(
               chatId,
               preview + "\n\n_... streaming ..._",
               { parse_mode: "Markdown" }
@@ -194,10 +195,11 @@ function runClaudeTurn(chatId, prompt) {
           // Markdown parse fail — try plain text
           try {
             if (statusMsgId) {
-              await bot.editMessageText(preview + "\n\n... streaming ...", {
-                chat_id: chatId,
-                message_id: statusMsgId,
-              });
+              await bot.api.editMessageText(
+                chatId,
+                statusMsgId,
+                preview + "\n\n... streaming ..."
+              );
             }
           } catch {
             // ignore edit failures
@@ -321,17 +323,16 @@ async function processQueue() {
         // Edit the streaming message with final text
         const chunks = splitMessage(result.text);
         try {
-          await bot.editMessageText(chunks[0], {
-            chat_id: chatId,
-            message_id: result.statusMsgId,
+          await bot.api.editMessageText(chatId, result.statusMsgId, chunks[0], {
             parse_mode: "Markdown",
           });
         } catch {
           try {
-            await bot.editMessageText(chunks[0], {
-              chat_id: chatId,
-              message_id: result.statusMsgId,
-            });
+            await bot.api.editMessageText(
+              chatId,
+              result.statusMsgId,
+              chunks[0]
+            );
           } catch {
             // fallback: send new message
             await sendLong(chatId, result.text);
@@ -345,13 +346,13 @@ async function processQueue() {
         await sendLong(chatId, result.text);
       }
     } else {
-      await bot.sendMessage(chatId, "_(Claude returned empty response)_", {
+      await bot.api.sendMessage(chatId, "_(Claude returned empty response)_", {
         parse_mode: "Markdown",
       });
     }
   } catch (err) {
     log(`Error: ${err.message}`);
-    await bot.sendMessage(chatId, `Error: ${err.message}`);
+    await bot.api.sendMessage(chatId, `Error: ${err.message}`);
   }
 
   isProcessing = false;
@@ -379,10 +380,10 @@ function splitMessage(text) {
 
 async function sendChunk(chatId, text) {
   try {
-    await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
+    await bot.api.sendMessage(chatId, text, { parse_mode: "Markdown" });
   } catch {
     try {
-      await bot.sendMessage(chatId, text);
+      await bot.api.sendMessage(chatId, text);
     } catch (e) {
       log(`Failed to send chunk: ${e.message}`);
     }
@@ -402,16 +403,7 @@ process.on("unhandledRejection", (err) => {
 });
 
 // --- Telegram Bot ---
-// Clear stale polling sessions before starting
-const https = require("https");
-const clearUrl = `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=-1`;
-https.get(clearUrl, () => {
-  log("Cleared stale Telegram updates");
-});
-
-const bot = new TelegramBot(BOT_TOKEN, {
-  polling: { interval: 1000, autoStart: true, params: { timeout: 30 } },
-});
+const bot = new Bot(BOT_TOKEN);
 
 log(`Bridge starting. Working directory: ${WORK_DIR}`);
 log(
@@ -421,19 +413,18 @@ if (sessionData.sessionId) {
   log(`Resuming session: ${sessionData.sessionId}`);
 }
 
-function isAllowed(msg) {
+function isAllowed(ctx) {
   if (ALLOWED_USERS.length === 0) return true;
-  return ALLOWED_USERS.includes(String(msg.from.id));
+  return ctx.from ? ALLOWED_USERS.includes(String(ctx.from.id)) : false;
 }
 
 // --- Commands ---
-bot.onText(/\/start/, (msg) => {
-  if (!isAllowed(msg)) return;
+bot.command("start", (ctx) => {
+  if (!isAllowed(ctx)) return;
   const sessionInfo = sessionData.sessionId
     ? `\nConversation: \`${sessionData.sessionId.slice(0, 8)}...\``
     : "\n_No active conversation (will start on first message)_";
-  bot.sendMessage(
-    msg.chat.id,
+  return ctx.reply(
     "Claude Code Telegram Bridge\n\n" +
       `Working directory: \`${WORK_DIR}\`${sessionInfo}\n\n` +
       "Send any message and Claude will respond with full conversation memory.\n\n" +
@@ -447,16 +438,15 @@ bot.onText(/\/start/, (msg) => {
   );
 });
 
-bot.onText(/\/status/, (msg) => {
-  if (!isAllowed(msg)) return;
+bot.command("status", (ctx) => {
+  if (!isAllowed(ctx)) return;
   const session = sessionData.sessionId
     ? `\`${sessionData.sessionId.slice(0, 8)}...\``
     : "none";
   const lastActive = sessionData.lastActive
     ? new Date(sessionData.lastActive).toLocaleString()
     : "never";
-  bot.sendMessage(
-    msg.chat.id,
+  return ctx.reply(
     `Bridge running\n` +
       `Working directory: \`${WORK_DIR}\`\n` +
       `Session: ${session}\n` +
@@ -467,13 +457,12 @@ bot.onText(/\/status/, (msg) => {
   );
 });
 
-bot.onText(/\/new/, (msg) => {
-  if (!isAllowed(msg)) return;
+bot.command("new", (ctx) => {
+  if (!isAllowed(ctx)) return;
   const oldSession = sessionData.sessionId;
   sessionData = {};
   saveSession(sessionData);
-  bot.sendMessage(
-    msg.chat.id,
+  return ctx.reply(
     `New conversation started.\n` +
       (oldSession
         ? `Previous session: \`${oldSession.slice(0, 8)}...\``
@@ -482,34 +471,31 @@ bot.onText(/\/new/, (msg) => {
   );
 });
 
-bot.onText(/\/stop/, (msg) => {
-  if (!isAllowed(msg)) return;
+bot.command("stop", (ctx) => {
+  if (!isAllowed(ctx)) return;
   if (activeChild) {
     activeChild.kill("SIGTERM");
-    bot.sendMessage(msg.chat.id, "Sent stop signal to Claude.");
+    return ctx.reply("Sent stop signal to Claude.");
   } else {
-    bot.sendMessage(msg.chat.id, "No active Claude process.");
+    return ctx.reply("No active Claude process.");
   }
 });
 
-bot.onText(/\/queue/, (msg) => {
-  if (!isAllowed(msg)) return;
+bot.command("queue", (ctx) => {
+  if (!isAllowed(ctx)) return;
   if (messageQueue.length === 0) {
-    bot.sendMessage(msg.chat.id, "Queue is empty.");
+    return ctx.reply("Queue is empty.");
   } else {
     const items = messageQueue
       .map((m, i) => `${i + 1}. ${m.text.slice(0, 50)}...`)
       .join("\n");
-    bot.sendMessage(msg.chat.id, `*Queue:*\n${items}`, {
-      parse_mode: "Markdown",
-    });
+    return ctx.reply(`*Queue:*\n${items}`, { parse_mode: "Markdown" });
   }
 });
 
-bot.onText(/\/help/, (msg) => {
-  if (!isAllowed(msg)) return;
-  bot.sendMessage(
-    msg.chat.id,
+bot.command("help", (ctx) => {
+  if (!isAllowed(ctx)) return;
+  return ctx.reply(
     "*Commands:*\n" +
       "/status — Bridge status, session, working directory\n" +
       "/new — Start a fresh conversation (clears session)\n" +
@@ -524,25 +510,24 @@ bot.onText(/\/help/, (msg) => {
 });
 
 // --- Main message handler ---
-bot.on("message", async (msg) => {
+bot.on("message:text", async (ctx) => {
+  const msg = ctx.message;
   if (msg.text && msg.text.startsWith("/")) return;
-  if (!isAllowed(msg)) {
-    log(`Blocked: user ${msg.from.id}`);
+  if (!isAllowed(ctx)) {
+    log(`Blocked: user ${ctx.from.id}`);
     return;
   }
-  if (!msg.text) return;
 
   const text = msg.text.trim();
   if (!text) return;
 
-  log(`From ${msg.from.first_name} (${msg.from.id}): ${text.slice(0, 100)}`);
-  logHistory(msg.from.id, "in", text);
+  log(`From ${ctx.from.first_name} (${ctx.from.id}): ${text.slice(0, 100)}`);
+  logHistory(ctx.from.id, "in", text);
 
-  messageQueue.push({ chatId: msg.chat.id, text, userId: msg.from.id });
+  messageQueue.push({ chatId: ctx.chat.id, text, userId: ctx.from.id });
 
   if (isProcessing) {
-    bot.sendMessage(
-      msg.chat.id,
+    await ctx.reply(
       `Queued (position ${messageQueue.length}). Processing previous message...`
     );
   } else {
@@ -551,9 +536,11 @@ bot.on("message", async (msg) => {
 });
 
 // --- Error handling ---
-bot.on("polling_error", (err) => {
-  if (!err.message.includes("409 Conflict")) {
-    log(`Polling error: ${err.message}`);
+bot.catch((err) => {
+  const e = err.error || err;
+  const message = e && e.message ? e.message : String(e);
+  if (!message.includes("409 Conflict")) {
+    log(`Bot error: ${message}`);
   }
 });
 
@@ -561,11 +548,16 @@ bot.on("polling_error", (err) => {
 function shutdown(signal) {
   log(`${signal} — shutting down`);
   if (activeChild) activeChild.kill("SIGTERM");
-  bot.stopPolling();
+  bot.stop();
   process.exit(0);
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-log("Bridge ready. Message your bot on Telegram.");
+// Start long polling. drop_pending_updates clears stale updates (replaces the
+// old manual getUpdates?offset=-1 call).
+bot.start({
+  drop_pending_updates: true,
+  onStart: () => log("Bridge ready. Message your bot on Telegram."),
+});

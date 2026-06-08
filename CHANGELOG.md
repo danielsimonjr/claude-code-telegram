@@ -4,6 +4,33 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Migrated the Telegram client off `node-telegram-bot-api` to
+  [grammY](https://grammy.dev) (`grammy@^1.43.0`), resolving issue #1.
+  `node-telegram-bot-api` transitively pulled the deprecated/unmaintained
+  `request` package (via `request-promise-core`); grammY has no such
+  dependency. Its only runtime deps are `@grammyjs/types`, `abort-controller`,
+  `debug`, and `node-fetch`. After the swap, `npm ls request` reports the
+  package is gone from the tree and `npm audit` reports 0 vulnerabilities.
+- Rewrote `bridge.js` for grammY's API while keeping behavior equivalent:
+  - `new TelegramBot(token, { polling })` → `new Bot(token)` + `bot.start()`.
+  - `bot.onText(/\/cmd/, ...)` → `bot.command("cmd", ctx => ...)`.
+  - `bot.on("message", ...)` → `bot.on("message:text", ...)` using `ctx`.
+  - `bot.sendMessage(...)` / `bot.editMessageText(text, { chat_id, ... })`
+    → `bot.api.sendMessage(...)` / `bot.api.editMessageText(chatId, msgId,
+    text, opts)` (grammY's positional signature).
+  - `bot.on("polling_error", ...)` → `bot.catch(...)`; `bot.stopPolling()`
+    → `bot.stop()`.
+  - Dropped the manual `getUpdates?offset=-1` HTTPS call in favor of
+    `bot.start({ drop_pending_updates: true })`.
+
+### Removed
+
+- The `overrides` block in `package.json` that existed only to neutralize the
+  `request` / `@cypress/request` / `request-promise-core` chain pulled by
+  `node-telegram-bot-api`. No longer needed with grammY.
+
 ## [1.0.1] - 2026-05-01
 
 ### Security
