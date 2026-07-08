@@ -24,6 +24,6 @@
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
-    "grammy": "^1.43.0"
+    "grammy": "^1.44.0"
   }
 }
