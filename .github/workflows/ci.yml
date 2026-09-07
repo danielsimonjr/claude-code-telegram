@@ -15,16 +15,30 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The bridge documents support for Windows, macOS and Linux while CI tested only
+        # Linux. The bridge spawns processes and writes under the user profile, which
+        # is exactly where the three platforms differ, so the claim is now tested.
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          cache: npm
-      - run: npm ci
-      # --if-present: run each stage only if the repo defines it (universal template).
-      - run: npm run typecheck --if-present
-      - run: npm run lint --if-present
-      - run: npm test --if-present
-      - run: npm run build --if-present
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+      - run: bun install --frozen-lockfile
+      # NOT --if-present. That flag succeeds silently when a script is missing, so a
+      # renamed or mistyped script produces a green run that checked nothing. All
+      # three exist; if one is removed, CI should fail and say so.
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+      # Run the BUILT artifact the way a user does, and confirm it refuses cleanly
+      # with no credentials -- the first thing a new user actually hits.
+      - run: node scripts/smoke.mjs

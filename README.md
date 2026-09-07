@@ -17,7 +17,8 @@ The bridge runs locally on your machine. Each message spawns `claude -p --resume
 ```bash
 git clone https://github.com/danielsimonjr/claude-code-telegram.git
 cd claude-code-telegram
-npm install
+bun install
+bun run build
 ```
 
 ### Configure
@@ -46,7 +47,7 @@ ALLOWED_USERS=your_user_id_here
 ### Run
 
 ```bash
-node bridge.js [optional-working-directory]
+node dist/index.js [optional-working-directory]
 ```
 
 Message your bot on Telegram. Claude Code starts on your first message.
@@ -94,7 +95,7 @@ All config lives in `~/.claude-code-telegram/.env`:
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Telegram    │────▶│  bridge.js       │────▶│  claude -p      │
+│  Telegram    │────▶│  dist/index.js   │────▶│  claude -p      │
 │  (phone)     │◀────│  (Node.js)       │◀────│  --resume <id>  │
 └─────────────┘     │                  │     │  --stream-json   │
                     │  • polling API   │     └─────────────────┘

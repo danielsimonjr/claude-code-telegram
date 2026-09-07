@@ -60,12 +60,18 @@ EOF
   echo "  Config saved to $CONFIG_DIR/.env"
 fi
 
-# 3. Install npm dependencies
+# 3. Install dependencies and build
+# The bridge is TypeScript now, so it must be compiled before it can run. A
+# production-only install would omit typescript and leave nothing to build with.
 echo ""
 echo "Installing dependencies..."
 cd "$(dirname "$0")"
-npm install --production
+bun install
 echo "  Dependencies installed"
+
+echo "Building..."
+bun run build
+echo "  Built to dist/"
 
 # 4. Done
 echo ""
@@ -73,7 +79,7 @@ echo "====================================="
 echo "Setup complete!"
 echo ""
 echo "To start:"
-echo "  node bridge.js [working-directory]"
+echo "  node dist/index.js [working-directory]"
 echo ""
 echo "Then message your bot on Telegram."
 echo ""
